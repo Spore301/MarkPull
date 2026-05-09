@@ -1,0 +1,12 @@
+.markpull-highlight-hover {
+  outline: 1.5px dashed #000000 !important;
+  outline-offset: -1.5px !important;
+  cursor: pointer !important;
+  background-color: rgba(0, 0, 0, 0.05) !important;
+}
+
+.markpull-highlight-selected {
+  outline: 1.5px solid #000000 !important;
+  outline-offset: -1.5px !important;
+  background-color: rgba(0, 0, 0, 0.1) !important;
+}
