@@ -20,7 +20,7 @@ export default function ProjectModal({ isOpen, onClose, onSave, defaultFilename 
         if (res && res.status === 'ok' && res.data.projects) {
           setProjects(res.data.projects);
           if (res.data.projects.length > 0) {
-            setSelectedProject(res.data.projects[0]);
+            setSelectedProject(res.data.projects[0].name);
           } else {
             setIsCreatingNew(true);
           }
@@ -35,8 +35,8 @@ export default function ProjectModal({ isOpen, onClose, onSave, defaultFilename 
 
   const handleSave = () => {
     const projName = isCreatingNew ? newProjectName : selectedProject;
-    if (!projName.trim() || !filename.trim()) return;
-    onSave(projName.trim(), filename.trim(), fileFormat);
+    if (!projName || !projName.trim()) return;
+    onSave(projName.trim());
   };
 
   return (
@@ -61,7 +61,7 @@ export default function ProjectModal({ isOpen, onClose, onSave, defaultFilename 
                     className="modal-input"
                     style={{ marginTop: 0 }}
                   >
-                    {projects.map(p => <option key={p} value={p}>{p}</option>)}
+                    {projects.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
                   </select>
                 )}
                 

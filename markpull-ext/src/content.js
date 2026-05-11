@@ -60,12 +60,61 @@ function getSortedSelections() {
   return arr.map(el => el.outerHTML);
 }
 
+function toggleStopPickingUI(active) {
+  const existing = document.getElementById('markpull-stop-picking-btn');
+  if (existing) existing.remove();
+
+  if (active) {
+    const btn = document.createElement('button');
+    btn.id = 'markpull-stop-picking-btn';
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg> Stop Picking';
+    
+    Object.assign(btn.style, {
+      position: 'fixed',
+      top: '16px',
+      right: '16px',
+      zIndex: '2147483647',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px',
+      background: '#ef4444',
+      color: 'white',
+      border: 'none',
+      borderRadius: '6px',
+      padding: '8px 16px',
+      fontSize: '14px',
+      fontWeight: '600',
+      cursor: 'pointer',
+      boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)',
+      whiteSpace: 'nowrap',
+      height: 'webkit-fill-available',
+      fontFamily: 'system-ui, -apple-system, sans-serif'
+    });
+
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      isActive = false;
+      document.querySelectorAll(`.${highlightClassHover}`).forEach(el => el.classList.remove(highlightClassHover));
+      document.querySelectorAll(`.${highlightClassSelected}`).forEach(el => el.classList.remove(highlightClassSelected));
+      selectedElements.clear();
+      toggleStopPickingUI(false);
+      chrome.runtime.sendMessage({ action: 'picker_stopped_from_page' });
+    });
+
+    document.body.appendChild(btn);
+  }
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'toggle_picker') {
     isActive = request.isActive;
     if (!isActive) {
       document.querySelectorAll(`.${highlightClassHover}`).forEach(el => el.classList.remove(highlightClassHover));
+      document.querySelectorAll(`.${highlightClassSelected}`).forEach(el => el.classList.remove(highlightClassSelected));
+      selectedElements.clear();
     }
+    toggleStopPickingUI(isActive);
     sendResponse({ status: 'ok', isActive });
   } else if (request.action === 'get_selection') {
     const selections = getSortedSelections();
@@ -92,6 +141,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
     
     isActive = true; // Turn on picker mode automatically
+    toggleStopPickingUI(true);
     
     sendResponse({ selections: getSortedSelections() });
   } else if (request.action === 'clear_selection') {
@@ -165,15 +215,12 @@ function extractImportantSegments(root) {
 }
 
 function detectMainContent() {
-  const semantic = document.querySelector('article, main, [role="main"]');
-  if (semantic && semantic.textContent.length > 200) return semantic;
-
-  const candidates = document.querySelectorAll('div, section');
+  const candidates = document.querySelectorAll('main, article, [role="main"], div, section');
   let bestScore = 0;
   let bestElement = document.body;
 
-  const contentRegex = /(content|post|article|body|entry|story)/i;
-  const ignoreRegex = /(nav|footer|sidebar|menu|comment|widget|ad|promo)/i;
+  const contentRegex = /(content|post|article|body|entry|story|main)/i;
+  const ignoreRegex = /(nav|footer|sidebar|menu|comment|widget|ad|promo|related)/i;
 
   candidates.forEach(el => {
     const className = typeof el.className === 'string' ? el.className : '';
@@ -183,21 +230,31 @@ function detectMainContent() {
     if (ignoreRegex.test(classId)) return;
 
     let score = 0;
+    
+    // Boost semantic tags
+    if (el.tagName === 'MAIN' || el.tagName === 'ARTICLE' || el.getAttribute('role') === 'main') {
+      score += 100;
+    }
+    
     if (contentRegex.test(classId)) score += 50;
     
-    const paragraphs = el.querySelectorAll('p');
+    // Count text from paragraphs and lists, which usually contain article content
+    const paragraphs = el.querySelectorAll('p, li, span');
     let textLength = 0;
     paragraphs.forEach(p => textLength += p.textContent.length);
+
+    // If it barely has any text, skip it
+    if (textLength < 100) return;
 
     score += textLength;
 
     const links = el.querySelectorAll('a');
     if (links.length > 0 && textLength > 0) {
        const linkDensity = links.length / (textLength / 100);
-       score -= linkDensity * 10;
+       score -= linkDensity * 20; // penalize high link density (often nav/menus)
     }
 
-    if (score > bestScore && textLength > 200) {
+    if (score > bestScore) {
       bestScore = score;
       bestElement = el;
     }

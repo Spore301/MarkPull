@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { extractHtmlToMarkdown } from './extractor';
 import { lintMarkdown } from './linter';
-import { Columns, FileCode, FileText, Download, Copy, MousePointer2, Sun, Moon, Monitor, ChevronDown, Maximize, ScanText, Save, Library as LibraryIcon, Edit3, MessageSquare } from 'lucide-react';
+import { marked } from 'marked';
+import { Columns, FileCode, FileText, Download, Copy, MousePointer2, Sun, Moon, Monitor, ChevronDown, Maximize, ScanText, Save, Library as LibraryIcon, Edit3, MessageSquare, Settings as SettingsIcon, X } from 'lucide-react';
 import logoDark from './assets/logo-dark.svg';
 import logoLight from './assets/logo-light.svg';
 import RawPreview from './RawPreview';
@@ -10,9 +11,13 @@ import StatusBar from './StatusBar';
 import Library from './Library';
 import ProjectModal from './ProjectModal';
 import Chat from './Chat';
+import Settings from './Settings';
+import CopyToAI from './CopyToAI';
+import { Rows2 } from 'lucide-react';
+
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('extract'); // 'extract', 'library', 'chat'
+  const [activeTab, setActiveTab] = useState('extract'); // 'extract', 'library', 'chat', 'settings'
   const [isPickerActive, setIsPickerActive] = useState(false);
   const [markdownOutput, setMarkdownOutput] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
@@ -34,12 +39,47 @@ export default function App() {
   const isDarkTheme = theme === 'dark' || (theme === 'system' && isSystemDark);
   const currentLogo = isDarkTheme ? logoDark : logoLight;
 
-  useEffect(() => {
-    chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-      if (tab) {
-        chrome.tabs.sendMessage(tab.id, { action: 'toggle_picker', isActive: isPickerActive }).catch(() => {});
+  const syncPickerState = async (tabId, isActive) => {
+    chrome.tabs.sendMessage(tabId, { action: 'toggle_picker', isActive }, (res) => {
+      if (chrome.runtime.lastError && isActive) {
+        const manifest = chrome.runtime.getManifest();
+        const contentJs = manifest.content_scripts?.[0]?.js;
+        if (contentJs) {
+          chrome.scripting.executeScript({ target: { tabId }, files: contentJs })
+            .then(() => chrome.tabs.sendMessage(tabId, { action: 'toggle_picker', isActive }))
+            .catch(() => {});
+        }
       }
     });
+  };
+
+  useEffect(() => {
+    const updateActiveTab = async () => {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab) syncPickerState(tab.id, isPickerActive);
+    };
+
+    updateActiveTab();
+
+    if (!isPickerActive) {
+      chrome.tabs.query({}).then(tabs => {
+        tabs.forEach(t => chrome.tabs.sendMessage(t.id, { action: 'toggle_picker', isActive: false }).catch(()=>{}));
+      });
+      return;
+    }
+
+    const handleActivated = () => setIsPickerActive(false);
+    const handleUpdated = (tabId, changeInfo, tab) => {
+      if (changeInfo.status === 'complete' && tab.active) syncPickerState(tabId, true);
+    };
+
+    chrome.tabs.onActivated.addListener(handleActivated);
+    chrome.tabs.onUpdated.addListener(handleUpdated);
+
+    return () => {
+      chrome.tabs.onActivated.removeListener(handleActivated);
+      chrome.tabs.onUpdated.removeListener(handleUpdated);
+    };
   }, [isPickerActive]);
 
   useEffect(() => {
@@ -52,6 +92,8 @@ export default function App() {
         } else {
           setMarkdownOutput('');
         }
+      } else if (request.action === 'picker_stopped_from_page') {
+        setIsPickerActive(false);
       }
     };
     chrome.runtime.onMessage.addListener(handleMessage);
@@ -71,15 +113,29 @@ export default function App() {
     setIsPickerActive(!isPickerActive);
   };
 
+  const injectAndRetry = async (tabId, payload, callback) => {
+    chrome.tabs.sendMessage(tabId, payload, (res) => {
+      if (chrome.runtime.lastError) {
+        const manifest = chrome.runtime.getManifest();
+        const contentJs = manifest.content_scripts?.[0]?.js;
+        if (contentJs) {
+          chrome.scripting.executeScript({ target: { tabId }, files: contentJs })
+            .then(() => chrome.tabs.sendMessage(tabId, payload, callback))
+            .catch(() => showStatus('Error injecting into page.'));
+        } else {
+          showStatus('Error communicating with page.');
+        }
+      } else {
+        callback(res);
+      }
+    });
+  };
+
   const extractFullPage = async () => {
     setDropdownOpen(false);
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab) {
-      chrome.tabs.sendMessage(tab.id, { action: 'extract_full_page' }, (response) => {
-        if (chrome.runtime.lastError) {
-           showStatus('Error communicating with page.');
-           return;
-        }
+      injectAndRetry(tab.id, { action: 'extract_full_page' }, (response) => {
         if (response && response.selections) {
           const rawMd = extractHtmlToMarkdown(response.selections);
           const lintedMd = lintMarkdown(rawMd);
@@ -95,37 +151,16 @@ export default function App() {
     setDropdownOpen(false);
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab) {
-      chrome.tabs.sendMessage(tab.id, { action: 'extract_auto_detect' }, (response) => {
-        if (chrome.runtime.lastError) {
-           showStatus('Error communicating with page.');
-           return;
-        }
+      injectAndRetry(tab.id, { action: 'extract_auto_detect' }, (response) => {
         if (response && response.selections) {
           const rawMd = extractHtmlToMarkdown(response.selections);
           const lintedMd = lintMarkdown(rawMd);
           setMarkdownOutput(lintedMd);
           showStatus('Auto-detected main content.');
-          setIsPickerActive(true); // Now we drop them into active picker mode!
+          setIsPickerActive(true);
         }
       });
     }
-  };
-
-  const enforceFilename = () => {
-    let currentName = filename.trim();
-    if (!currentName || currentName === 'export.md') {
-      const newName = window.prompt('Please enter a file name for this document:', currentName || 'export.md');
-      if (!newName || !newName.trim()) return null;
-      currentName = newName.trim();
-      if (!currentName.endsWith('.md')) currentName += '.md';
-      setFilename(currentName);
-    } else {
-      if (!currentName.endsWith('.md')) {
-        currentName += '.md';
-        setFilename(currentName);
-      }
-    }
-    return currentName;
   };
 
   const copyToClipboard = () => {
@@ -135,13 +170,43 @@ export default function App() {
   };
 
   const downloadMarkdown = () => {
-    const finalName = enforceFilename();
-    if (!finalName) return;
-    const blob = new Blob([markdownOutput], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
+    let currentName = filename.trim() || 'export.md';
+    const match = currentName.match(/\.(md|pdf|docx|html)$/);
+    const format = match ? match[1] : 'md';
+    if (!match) currentName += '.md';
+    
+    let contentBlob;
+    if (format === 'html') {
+      const htmlContent = `<!DOCTYPE html>\n<html>\n<head><meta charset="utf-8"><title>Export</title></head>\n<body>\n${marked.parse(markdownOutput)}</body>\n</html>`;
+      contentBlob = new Blob([htmlContent], { type: 'text/html' });
+    } else if (format === 'docx') {
+      const htmlContent = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><title>Export</title></head><body>${marked.parse(markdownOutput)}</body></html>`;
+      contentBlob = new Blob([htmlContent], { type: 'application/msword' });
+    } else if (format === 'pdf') {
+      const htmlContent = `<!DOCTYPE html>\n<html>\n<head><meta charset="utf-8"><title>Export</title><style>body { font-family: sans-serif; padding: 20px; }</style></head>\n<body>\n${marked.parse(markdownOutput)}</body>\n</html>`;
+      const iframe = document.createElement('iframe');
+      iframe.style.position = 'fixed';
+      iframe.style.right = '0';
+      iframe.style.bottom = '0';
+      iframe.style.width = '0';
+      iframe.style.height = '0';
+      iframe.style.border = '0';
+      document.body.appendChild(iframe);
+      iframe.contentDocument.write(htmlContent);
+      iframe.contentDocument.close();
+      iframe.contentWindow.focus();
+      iframe.contentWindow.print();
+      setTimeout(() => document.body.removeChild(iframe), 1000);
+      showStatus('Opened print dialog...');
+      return;
+    } else {
+      contentBlob = new Blob([markdownOutput], { type: 'text/markdown' });
+    }
+
+    const url = URL.createObjectURL(contentBlob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = finalName;
+    a.download = currentName;
     a.click();
     URL.revokeObjectURL(url);
     showStatus('Downloaded!');
@@ -152,13 +217,19 @@ export default function App() {
     setIsProjectModalOpen(true);
   };
 
-  const handleSaveToDrive = (projectName, savedFilename, savedFormat) => {
+  const handleSaveToDrive = (projectName) => {
     setIsProjectModalOpen(false);
-    showStatus('Saving to Drive...');
+    showStatus('Saving...');
+
+    // Extract format from filename if it exists
+    const formatMatch = filename.match(/\.(md|pdf|docx|html)$/);
+    const savedFormat = formatMatch ? formatMatch[1] : 'md';
+    const savedFilename = filename.replace(/\.(md|pdf|docx|html)$/, '') || 'export';
+    
     chrome.runtime.sendMessage({
       action: 'save_to_drive',
-      projectName,
-      filename: savedFilename,
+      projectName: projectName,
+      filename: `${savedFilename}.${savedFormat}`,
       format: savedFormat,
       content: markdownOutput
     }, (res) => {
@@ -170,14 +241,12 @@ export default function App() {
     });
   };
 
-  const ThemeIcon = theme === 'light' ? Sun : theme === 'dark' ? Moon : Monitor;
-
   return (
     <div className="panel-container">
       <div className="header">
         <img src={currentLogo} alt="MarkPull" className="app-logo" />
         
-        <div className="view-selector-pill" style={{ display: 'flex', background: 'transparent', borderRadius: 'var(--radius-pill)', padding: '4px', gap: '4px' }}>
+        <div className="view-selector-pill" style={{ display: 'flex', alignItems: 'stretch', background: 'transparent', borderRadius: 'var(--radius-pill)', padding: '4px', gap: '4px' }}>
           <button 
             className={`tab-button icon-only ${activeTab === 'extract' ? 'active' : ''}`} 
             onClick={() => setActiveTab('extract')} title="Extract">
@@ -193,43 +262,57 @@ export default function App() {
             onClick={() => setActiveTab('chat')} title="Chat (AI)">
             <MessageSquare size={16} />
           </button>
+          <button 
+            className={`tab-button icon-only ${activeTab === 'settings' ? 'active' : ''}`} 
+            onClick={() => setActiveTab('settings')} title="Settings">
+            <SettingsIcon size={16} />
+          </button>
         </div>
 
         <div className="header-actions">
-          {activeTab === 'extract' && (
-            <div className="dropdown-container">
-              <button className="action-button primary" onClick={() => setDropdownOpen(!dropdownOpen)}>
-                Extract <ChevronDown size={14} />
-              </button>
-              {dropdownOpen && (
-                <div className="dropdown-menu glass-card">
-                  <button onClick={() => { setDropdownOpen(false); togglePicker(); }}>
-                    <MousePointer2 size={14} /> {isPickerActive ? 'Stop Picking' : 'Pick Sections'}
-                  </button>
-                  <button onClick={extractAutoDetect}>
-                    <ScanText size={14} /> Auto Detect
-                  </button>
-                  <button onClick={extractFullPage}>
-                    <Maximize size={14} /> Full Page
-                  </button>
-                </div>
-              )}
-            </div>
+          {isPickerActive && (
+            <button 
+              className="action-button danger" 
+              style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'var(--accent-red, #ef4444)', color: 'white', border: 'none', padding: '6px 12px', fontSize: '0.85rem' }}
+              onClick={() => setIsPickerActive(false)}
+            >
+              <X size={14} />
+            </button>
           )}
-          
-          <button className="icon-button" onClick={() => setTheme(t => t === 'light' ? 'dark' : t === 'dark' ? 'system' : 'light')} title="Toggle Theme" aria-label="Toggle Theme">
-            <ThemeIcon size={16} />
-          </button>
+
+          <div className="dropdown-container">
+            <button className="action-button primary" onClick={() => setDropdownOpen(!dropdownOpen)}>
+              Extract <ChevronDown size={14} />
+            </button>
+            {dropdownOpen && (
+              <div className="dropdown-menu glass-card">
+                <button onClick={() => { setDropdownOpen(false); togglePicker(); }}>
+                  <MousePointer2 size={14} /> {isPickerActive ? 'Stop Picking' : 'Pick Sections'}
+                </button>
+                <button onClick={extractAutoDetect}>
+                  <ScanText size={14} /> Auto Detect
+                </button>
+                <button onClick={extractFullPage}>
+                  <Maximize size={14} /> Full Page
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      {activeTab === 'chat' ? (
+      {activeTab === 'settings' ? (
+        <Settings theme={theme} setTheme={setTheme} />
+      ) : activeTab === 'chat' ? (
         <Chat markdownOutput={markdownOutput} />
       ) : activeTab === 'library' ? (
-        <Library onLoadFile={(content) => {
-          setMarkdownOutput(content);
-          setActiveTab('extract');
-        }} />
+        <Library 
+          onLoadFile={(content) => {
+            setMarkdownOutput(content);
+            setActiveTab('extract');
+          }} 
+          onShowStatus={showStatus}
+        />
       ) : (
         <>
           <div className="main-content animate-fade-in">
@@ -244,10 +327,12 @@ export default function App() {
               {viewMode === 'rendered' && <RenderedPreview markdown={markdownOutput} />}
               
               <div className="floating-sidebar">
-                <button className={`icon-button ${viewMode === 'split' ? 'active' : ''}`} onClick={() => setViewMode('split')} title="Split View" aria-label="Split View"><Columns size={16}/></button>
+                <button className={`icon-button ${viewMode === 'split' ? 'active' : ''}`} onClick={() => setViewMode('split')} title="Split View" aria-label="Split View"><Rows2 size={16}/></button>
                 <button className={`icon-button ${viewMode === 'raw' ? 'active' : ''}`} onClick={() => setViewMode('raw')} title="Raw View" aria-label="Raw View"><FileCode size={16}/></button>
                 <button className={`icon-button ${viewMode === 'rendered' ? 'active' : ''}`} onClick={() => setViewMode('rendered')} title="Rendered View" aria-label="Rendered View"><FileText size={16}/></button>
               </div>
+
+              <CopyToAI markdownOutput={markdownOutput} />
             </div>
           </div>
 
@@ -260,13 +345,12 @@ export default function App() {
                   value={filename}
                   onChange={(e) => setFilename(e.target.value)}
                   placeholder="Enter the name of the file"
-                  style={{ flex: 1, margin: 0, padding: '8px 12px' }}
+                  style={{ flex: 1, margin: 0, padding: '0 12px', height: '36px' }}
                 />
                 <select 
                   className="modal-input"
-                  style={{ width: '80px', margin: 0, padding: '8px' }}
+                  style={{ width: '80px', margin: 0, padding: '0 8px', height: '36px' }}
                   onChange={(e) => {
-                    // Update filename extension if format changes
                     const currentBase = filename.replace(/\.(md|pdf|docx|html)$/, '') || 'export';
                     setFilename(`${currentBase}.${e.target.value}`);
                   }}
@@ -280,26 +364,27 @@ export default function App() {
               </div>
 
               <div className="footer-actions" style={{ margin: 0 }}>
-                <button className="action-button secondary" onClick={copyToClipboard} disabled={!markdownOutput}>
-                  <Copy size={14} /> Copy
+                <button className="action-button secondary" onClick={copyToClipboard} disabled={!markdownOutput} title="Copy">
+                  <Copy size={14} />
                 </button>
-                <button className="action-button secondary" onClick={downloadMarkdown} disabled={!markdownOutput}>
-                  <Download size={14} /> Download
+                <button className="action-button secondary" onClick={downloadMarkdown} disabled={!markdownOutput} title="Download">
+                  <Download size={14} />
                 </button>
                 <button className="action-button primary" onClick={handleSaveClick} disabled={!markdownOutput}>
                   <Save size={14} /> Save
                 </button>
               </div>
             </div>
-            {statusMessage && (
-              <div className="status-container" style={{ position: 'absolute', bottom: 'calc(100% + 8px)', right: '16px', background: 'var(--bg-card)', padding: '6px 12px', borderRadius: 'var(--radius-pill)', border: '1px solid var(--border-glass)', boxShadow: 'var(--shadow-card)', zIndex: 10 }}>
-                <span className="status-msg" style={{ margin: 0 }}>{statusMessage}</span>
-              </div>
-            )}
           </div>
 
           <StatusBar markdown={markdownOutput} />
         </>
+      )}
+
+      {statusMessage && (
+        <div className="status-container" style={{ position: 'absolute', bottom: '24px', right: '24px', background: 'var(--bg-card)', padding: '8px 16px', borderRadius: 'var(--radius-pill)', border: '1px solid var(--border-glass)', boxShadow: 'var(--shadow-card)', zIndex: 1000, animation: 'fadeUp 0.3s forwards ease-out' }}>
+          <span className="status-msg" style={{ margin: 0, opacity: 1, transform: 'none', animation: 'none' }}>{statusMessage}</span>
+        </div>
       )}
 
       <ProjectModal 

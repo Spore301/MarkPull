@@ -8,9 +8,11 @@
     "scripting",
     "sidePanel",
     "storage",
-    "identity"
+    "identity",
+    "tabs"
   ],
   "host_permissions": [
+    "<all_urls>",
     "https://openrouter.ai/*",
     "https://generativelanguage.googleapis.com/*",
     "http://localhost/*"
@@ -46,7 +48,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["*"],
+      "resources": ["*", "*.png", "*.svg", "capsule.png", "assets/*", "src/assets/*"],
       "matches": ["<all_urls>"]
     }
   ]

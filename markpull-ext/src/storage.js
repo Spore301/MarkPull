@@ -21,3 +21,23 @@ export async function addToQueue(item) {
 export async function clearQueue() {
   await setStorageData('save_queue', []);
 }
+
+const DEFAULT_AI_CONFIG = {
+  activeVendor: 'openai',
+  vendors: {
+    openai: { apiKey: '', model: 'gpt-4o' },
+    deepseek: { apiKey: '', model: 'deepseek-chat' },
+    anthropic: { apiKey: '', model: 'claude-3-5-sonnet-20240620' },
+    ollama: { apiKey: 'http://localhost:11434', model: 'kimi-k2.5:cloud' },
+    openrouter: { apiKey: '', model: 'qwen/qwen3.5-9b' }
+  }
+};
+
+export async function getAiConfig() {
+  const config = await getStorageData('ai_config');
+  return config || DEFAULT_AI_CONFIG;
+}
+
+export async function setAiConfig(config) {
+  await setStorageData('ai_config', config);
+}
